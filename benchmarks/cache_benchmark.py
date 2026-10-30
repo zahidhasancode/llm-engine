@@ -18,6 +18,7 @@ import torch
 from engine.cache import KVCache
 from engine.generate import generate
 from engine.model import ModelConfig, Qwen2
+from engine.sampling import SamplingParams
 
 OUTPUT = Path(__file__).parent / "cache_cpu_tiny.json"
 
@@ -59,13 +60,14 @@ def hardware() -> dict:
 
 
 def measure(model: Qwen2, ids: torch.Tensor, new_tokens: int, use_cache: bool) -> dict:
+    params = SamplingParams(temperature=0.0, max_tokens=new_tokens)
     for _ in range(WARMUP_RUNS):
-        generate(model, ids, new_tokens, use_cache=use_cache)
+        generate(model, ids, params, use_cache=use_cache)
 
     seconds = []
     for _ in range(REPEATS):
         start = time.perf_counter()
-        output = generate(model, ids, new_tokens, use_cache=use_cache)
+        output = generate(model, ids, params, use_cache=use_cache)[0]
         seconds.append(time.perf_counter() - start)
 
     median = statistics.median(seconds)

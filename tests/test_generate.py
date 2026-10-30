@@ -5,7 +5,8 @@ import torch
 
 from engine.cache import KVCache
 from engine.generate import generate
-from tiny import hf_config, hf_model, my_model, random_ids
+from engine.sampling import SamplingParams
+from tiny import greedy, hf_config, hf_model, my_model, random_ids
 
 VARIANTS = [
     pytest.param({}, id="plain"),
@@ -35,8 +36,8 @@ def test_cached_generation_equals_uncached(overrides, batch, prompt_length):
     model = my_model(hf_model(hf_config(**overrides)))
     ids = random_ids(batch, prompt_length)
 
-    cached = generate(model, ids, 40, use_cache=True)
-    uncached = generate(model, ids, 40, use_cache=False)
+    cached = greedy(model, ids, 40, use_cache=True)
+    uncached = greedy(model, ids, 40, use_cache=False)
 
     assert torch.equal(cached, uncached)
     assert cached.shape == (batch, prompt_length + 40)
@@ -50,67 +51,40 @@ def test_generation_matches_hugging_face(overrides, attn_implementation):
     hf = hf_model(config)
     ids = random_ids(2, 8)
 
-    mine = generate(my_model(hf), ids, 40)
+    mine = greedy(my_model(hf), ids, 40)
 
     assert torch.equal(mine, hf_generate(hf, ids, 40))
     assert mine[:, 8:].unique().numel() >= 5, "output too repetitive to prove anything"
 
 
-def test_eos_stops_generation_and_matches_hugging_face():
+def test_stop_token_matches_hugging_face():
     hf = hf_model(hf_config())
     mine = my_model(hf)
     ids = random_ids(2, 8)
     # A token that really appears in the output, partway through the first sequence.
-    eos = generate(mine, ids, 20)[0, 13].item()
+    stop = greedy(mine, ids, 20)[0, 13].item()
 
-    result = generate(mine, ids, 20, eos_token_id=eos)
-    uncached = generate(mine, ids, 20, use_cache=False, eos_token_id=eos)
-    reference = hf_generate(hf, ids, 20, eos_token_id=eos, pad_token_id=eos)
+    params = SamplingParams(temperature=0.0, max_tokens=20, stop_tokens=(stop,))
+    results = generate(mine, ids, params)
+    uncached = generate(mine, ids, params, use_cache=False)
+    reference = hf_generate(hf, ids, 20, eos_token_id=stop, pad_token_id=stop)
 
-    assert torch.equal(result, uncached)
-    assert torch.equal(result, reference)
-
-
-def test_single_sequence_stops_right_after_eos():
-    mine = my_model(hf_model(hf_config()))
-    ids = random_ids(1, 8)
-    full = generate(mine, ids, 20)
-    eos = full[0, 13].item()
-    stop = (full[0, 8:] == eos).nonzero()[0].item() + 8
-
-    assert torch.equal(generate(mine, ids, 20, eos_token_id=eos), full[:, : stop + 1])
-
-
-def test_finished_sequence_is_filled_with_eos_until_the_batch_is_done():
-    mine = my_model(hf_model(hf_config()))
-    ids = random_ids(2, 8)
-    full = generate(mine, ids, 20)
-    eos = full[0, 13].item()
-    stop = (full[0, 8:] == eos).nonzero()[0].item() + 8
-    assert eos not in full[1, 8:], "needs a token the second sequence never produces"
-
-    result = generate(mine, ids, 20, eos_token_id=eos)
-
-    assert (result[0, stop:] == eos).all()
-    assert torch.equal(result[1], full[1])
-
-
-def test_eos_in_the_prompt_does_not_stop_generation():
-    mine = my_model(hf_model(hf_config()))
-    ids = random_ids(1, 8)
-    assert generate(mine, ids, 5, eos_token_id=ids[0, 3].item()).shape[1] > 8
+    for row, result in enumerate(results):
+        assert torch.equal(result, uncached[row])
+        assert torch.equal(result, reference[row, : len(result)])
+        assert (reference[row, len(result) :] == stop).all()
 
 
 def test_zero_new_tokens_returns_the_prompt():
     mine = my_model(hf_model(hf_config()))
     ids = random_ids()
-    assert torch.equal(generate(mine, ids, 0), ids)
+    assert torch.equal(greedy(mine, ids, 0), ids)
 
 
-def test_negative_new_tokens_raises():
+def test_wrong_number_of_params_raises():
     mine = my_model(hf_model(hf_config()))
-    with pytest.raises(ValueError):
-        generate(mine, random_ids(), -1)
+    with pytest.raises(ValueError, match="SamplingParams"):
+        generate(mine, random_ids(batch=2), [SamplingParams()])
 
 
 @pytest.mark.parametrize("split", [[16], [1] * 16, [10, 1, 5], [3, 3, 10]])
@@ -157,11 +131,11 @@ def test_each_cached_step_processes_one_token():
     seen = []
     mine.tok_embed.register_forward_hook(lambda _, inputs, __: seen.append(inputs[0].shape[1]))
 
-    generate(mine, random_ids(1, 8), 5, use_cache=True)
+    greedy(mine, random_ids(1, 8), 5, use_cache=True)
     assert seen == [8, 1, 1, 1, 1]
 
     seen.clear()
-    generate(mine, random_ids(1, 8), 5, use_cache=False)
+    greedy(mine, random_ids(1, 8), 5, use_cache=False)
     assert seen == [8, 9, 10, 11, 12]
 
 
