@@ -8,3 +8,6 @@ __pycache__/
 *.bin
 *.pt
 *.pth
+
+# Raw Kaggle downloads. Only result files are copied into benchmarks/.
+kaggle/output/
