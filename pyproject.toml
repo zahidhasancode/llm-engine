@@ -1,0 +1,21 @@
+[project]
+name = "llm-engine"
+version = "0.1.0"
+description = "A from-scratch LLM serving engine for learning, in Python and PyTorch."
+requires-python = ">=3.11"
+dependencies = ["torch", "safetensors"]
+
+[project.optional-dependencies]
+# transformers is the reference the tests compare against. The engine never imports it.
+dev = ["transformers", "pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
