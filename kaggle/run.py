@@ -49,7 +49,13 @@ def find_code() -> str:
 
 def main() -> None:
     sh(sys.executable, "-m", "pip", "install", "-q", *PINNED)
+    # The image's torchvision is built for its own torch, and transformers imports it if
+    # it exists. Nothing here needs it.
+    sh(sys.executable, "-m", "pip", "uninstall", "-q", "-y", "torchvision", "torchaudio")
     sh("nvidia-smi")
+    # Fail in seconds, not after the weights download, if this torch cannot see the GPU.
+    sh(sys.executable, "-c", "import torch; print(torch.__version__, torch.version.cuda); "
+       "assert torch.cuda.device_count() == 1; print(torch.cuda.get_device_name(0))")
 
     repo = f"{WORK}/repo"
     shutil.copytree(find_code(), repo, dirs_exist_ok=True)
