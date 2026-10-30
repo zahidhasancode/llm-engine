@@ -142,20 +142,23 @@ class Attention(nn.Module):
         k = k.repeat_interleave(self.queries_per_kv, dim=1)
         v = v.repeat_interleave(self.queries_per_kv, dim=1)
 
-        scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, T, total)
-
         # A token may only look at itself and earlier tokens. New token i sits at
         # position past + i, so everything beyond that column is hidden from it.
         future = torch.triu(
             torch.ones(seq_len, total, dtype=torch.bool, device=x.device), past + 1
         )
+
+        out = self.attend(q, k, v, future)
+        return self.o_proj(out.transpose(1, 2).reshape(batch, seq_len, -1))  # (B, T, H*D)
+
+    def attend(self, q: Tensor, k: Tensor, v: Tensor, future: Tensor) -> Tensor:
+        """Scaled dot-product attention. Returns one mixed value per query, (B, H, T, D)."""
+        scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, T, total)
         scores = scores.masked_fill(future, -torch.inf)
 
         # Softmax in float32 for the same overflow reason as RMSNorm.
         weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
-
-        out = (weights @ v).transpose(1, 2).reshape(batch, seq_len, -1)  # (B, T, H*D)
-        return self.o_proj(out)
+        return weights @ v
 
 
 class MLP(nn.Module):

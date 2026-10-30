@@ -71,7 +71,7 @@ def test_every_engine_is_measured_at_every_prompt_length(result):
     prompts = result["benchmark"]["prompts"]
     assert [prompt["prompt_tokens"] for prompt in prompts] == [4, 24]
     for prompt in prompts:
-        assert len(prompt["engines"]) == 6
+        assert len(prompt["engines"]) == 8
         for engine in prompt["engines"].values():
             assert engine["ttft_ms"]["median"] > 0
             assert engine["decode_tokens_per_s"]["median"] > 0
@@ -80,8 +80,9 @@ def test_every_engine_is_measured_at_every_prompt_length(result):
 def test_all_engines_produce_the_same_tokens(result):
     # float16 on CPU, tiny model: rounding is small enough here for exact agreement.
     for prompt in result["benchmark"]["prompts"]:
-        differences = prompt["first_token_position_differing_from_hf_sdpa"]
-        assert set(differences.values()) == {None}
+        for key in ("sdpa", "eager"):
+            differences = prompt[f"first_token_position_differing_from_hf_{key}"]
+            assert set(differences.values()) == {None}
 
 
 def test_result_states_model_hardware_and_settings(result):
@@ -118,6 +119,30 @@ def test_forward_only_loops_equal_generate():
 
     assert torch.equal(real_model.forward_only_mine(mine, ids, 12), expected)
     assert torch.equal(real_model.forward_only_hf(hf, ids, 12), expected)
+
+
+@pytest.mark.parametrize(
+    "attention", [real_model.SdpaAttention, real_model.NativeSoftmaxAttention]
+)
+def test_attention_variants_keep_the_same_output(attention):
+    mine = my_model(hf_model(hf_config(num_key_value_heads=2)))
+    variant = real_model.with_attention(mine, attention)
+    ids = random_ids(1, 8)
+    params = real_model.SamplingParams(temperature=0.0, max_tokens=20)
+
+    with torch.no_grad():
+        assert (variant(ids) - mine(ids)).abs().max() < 1e-4
+    assert torch.equal(
+        real_model.generate(variant, ids, params)[0], real_model.generate(mine, ids, params)[0]
+    )
+
+
+def test_attention_variant_shares_the_weights():
+    mine = my_model(hf_model(hf_config()))
+    variant = real_model.with_attention(mine, real_model.SdpaAttention)
+    assert variant.tok_embed.weight.data_ptr() == mine.tok_embed.weight.data_ptr()
+    assert type(variant.blocks[0].attn) is real_model.SdpaAttention
+    assert type(mine.blocks[0].attn) is real_model.Attention
 
 
 def test_first_difference():

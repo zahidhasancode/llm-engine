@@ -6,6 +6,8 @@ Three things are measured and saved as JSON:
 2. Speed: time to first token and tokens per second through each generate function.
 3. Forward only: the same model loop with no generate function around it, which shows
    how much of any speed difference comes from the model and how much from the wrapper.
+4. Attention variants: my model with its attention step swapped, which shows whether
+   the attention function explains the difference. They exist only in this file.
 
 Every run is greedy, one request, with stop tokens off, so each engine makes the same
 number of model calls. Runs are timed by a hook on lm_head that waits for the GPU, placed
@@ -30,6 +32,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import transformers
 from torch import Tensor
 from transformers import AutoTokenizer, DynamicCache, GenerationConfig, Qwen2ForCausalLM
@@ -37,7 +40,7 @@ from transformers import AutoTokenizer, DynamicCache, GenerationConfig, Qwen2For
 from engine.cache import KVCache
 from engine.generate import generate
 from engine.loader import load_pretrained
-from engine.model import Qwen2
+from engine.model import Attention, Qwen2
 from engine.sampling import SamplingParams
 
 PARITY_TOLERANCE = 1e-4
@@ -87,6 +90,31 @@ def load_hf(path: str, dtype: torch.dtype, attention: str, device: str) -> Qwen2
     return model.to(device).eval()
 
 
+class SdpaAttention(Attention):
+    """PyTorch's built-in attention, the function Hugging Face uses by default."""
+
+    def attend(self, q: Tensor, k: Tensor, v: Tensor, future: Tensor) -> Tensor:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=~future)
+
+
+class NativeSoftmaxAttention(Attention):
+    """My attention, except that softmax stays in the model's dtype."""
+
+    def attend(self, q: Tensor, k: Tensor, v: Tensor, future: Tensor) -> Tensor:
+        scores = (q @ k.transpose(-2, -1)) * self.scale
+        return scores.masked_fill(future, -torch.inf).softmax(dim=-1) @ v
+
+
+def with_attention(model: Qwen2, attention: type[Attention]) -> Qwen2:
+    """A second model that shares the weights, so it costs no extra memory."""
+    with torch.device("meta"):
+        variant = Qwen2(model.config)
+    variant.load_state_dict(model.state_dict(), assign=True)
+    for block in variant.blocks:
+        block.attn.__class__ = attention
+    return variant.eval()
+
+
 def encode(tokenizer, text: str, device: str) -> Tensor:
     return tokenizer(text, return_tensors="pt").input_ids.to(device)
 
@@ -104,18 +132,30 @@ def prompt_of_length(tokenizer, length: int, device: str) -> Tensor:
 # Parity
 
 
+def logits_of(model, ids: Tensor) -> Tensor:
+    output = model(ids)
+    return output if isinstance(output, Tensor) else output.logits
+
+
 @torch.no_grad()
-def compare_logits(mine: Qwen2, hf: Qwen2ForCausalLM, ids: Tensor) -> dict:
-    my_logits = mine(ids)
-    hf_logits = hf(ids).logits
+def compare_logits(first, second, ids: Tensor) -> dict:
+    first_logits = logits_of(first, ids)
+    second_logits = logits_of(second, ids)
     return {
         "tokens": ids.shape[1],
-        "max_abs_difference": (my_logits - hf_logits).abs().max().item(),
-        "largest_logit": hf_logits.abs().max().item(),
+        "max_abs_difference": (first_logits - second_logits).abs().max().item(),
+        "largest_logit": second_logits.abs().max().item(),
         "top_token_agreement": (
-            (my_logits.argmax(-1) == hf_logits.argmax(-1)).float().mean().item()
+            (first_logits.argmax(-1) == second_logits.argmax(-1)).float().mean().item()
         ),
     }
+
+
+@torch.no_grad()
+def top_two(model, ids: Tensor) -> dict:
+    """The two best first tokens. A small gap means rounding alone can swap them."""
+    values, tokens = logits_of(model, ids)[0, -1].topk(2)
+    return {"tokens": tokens.tolist(), "logits": values.tolist()}
 
 
 def check_parity(path: str, tokenizer, device: str) -> dict:
@@ -253,8 +293,8 @@ def benchmark_prompt(
     prompt_length = ids.shape[1]
     params = SamplingParams(temperature=0.0, max_tokens=new_tokens)
 
-    def run_mine() -> Tensor:
-        return generate(models["mine"], ids, params)[0]
+    def run_mine(model) -> Callable[[], Tensor]:
+        return lambda: generate(model, ids, params)[0]
 
     def run_hf(model) -> Callable[[], Tensor]:
         return lambda: model.generate(
@@ -265,7 +305,13 @@ def benchmark_prompt(
         )[0]
 
     engines = {
-        "mine_generate": (models["mine"], run_mine),
+        "mine_generate": (models["mine"], run_mine(models["mine"])),
+        "mine_with_sdpa_generate": (
+            models["mine_sdpa"], run_mine(models["mine_sdpa"])
+        ),
+        "mine_with_native_softmax_generate": (
+            models["mine_native_softmax"], run_mine(models["mine_native_softmax"])
+        ),
         "hf_generate_sdpa": (models["sdpa"], run_hf(models["sdpa"])),
         "hf_generate_eager": (models["eager"], run_hf(models["eager"])),
         "mine_forward_only": (
@@ -288,14 +334,26 @@ def benchmark_prompt(
             if round_number >= warmups:
                 runs[name].append(result)
 
-    reference = outputs["hf_generate_sdpa"]
     return {
         "prompt_tokens": prompt_length,
         "new_tokens": new_tokens,
         "engines": {name: summarise(results) for name, results in runs.items()},
         "raw_runs": runs,
         "first_token_position_differing_from_hf_sdpa": {
-            name: first_difference(output, reference) for name, output in outputs.items()
+            name: first_difference(output, outputs["hf_generate_sdpa"])
+            for name, output in outputs.items()
+        },
+        "first_token_position_differing_from_hf_eager": {
+            name: first_difference(output, outputs["hf_generate_eager"])
+            for name, output in outputs.items()
+        },
+        "first_token_choice": {
+            name: top_two(model, ids) for name, model in models.items()
+        },
+        "logits_in_benchmark_dtype": {
+            "mine_vs_hf_eager": compare_logits(models["mine"], models["eager"], ids),
+            "mine_vs_hf_sdpa": compare_logits(models["mine"], models["sdpa"], ids),
+            "hf_eager_vs_hf_sdpa": compare_logits(models["eager"], models["sdpa"], ids),
         },
     }
 
@@ -311,6 +369,8 @@ def run_benchmark(
         "sdpa": load_hf(path, dtype, "sdpa", device),
         "eager": load_hf(path, dtype, "eager", device),
     }
+    models["mine_sdpa"] = with_attention(models["mine"], SdpaAttention)
+    models["mine_native_softmax"] = with_attention(models["mine"], NativeSoftmaxAttention)
     results = [
         benchmark_prompt(
             models, prompt_of_length(tokenizer, length, device), new_tokens, repeats, warmups, device
@@ -383,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
             "warmup_rounds_discarded": args.warmups,
             "timing": "hook on lm_head with GPU synchronisation, identical for both engines",
             "ttft": "from calling generate to the first logits being ready on the GPU",
+            "peak_gpu_mb": "includes all loaded models, so it does not compare engines",
             "decode_tokens_per_s": "tokens after the first, between first and last stamp",
         },
     }
@@ -403,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"prompt {prompt['prompt_tokens']} tokens, {prompt['new_tokens']} new:")
         for name, engine in prompt["engines"].items():
             print(
-                f"  {name:24} ttft {engine['ttft_ms']['median']:9.2f} ms   "
+                f"  {name:34} ttft {engine['ttft_ms']['median']:9.2f} ms   "
                 f"decode {engine['decode_tokens_per_s']['median']:8.2f} tok/s"
             )
 
