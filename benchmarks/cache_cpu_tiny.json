@@ -1,0 +1,127 @@
+{
+  "what": "Greedy generation, ms per generated token, with and without the KV cache",
+  "caveat": "Tiny random model. Shows scaling only, not real model speed.",
+  "hardware": {
+    "cpu": "Apple M2",
+    "memory_gb": 8.0,
+    "os": "macOS-26.6.2-arm64-arm-64bit"
+  },
+  "software": {
+    "python": "3.11.9",
+    "torch": "2.15.0"
+  },
+  "model": {
+    "name": "Qwen2, tiny, random weights",
+    "layers": 3,
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "heads": 4,
+    "kv_heads": 4,
+    "vocab_size": 97,
+    "dtype": "float32"
+  },
+  "settings": {
+    "device": "cpu",
+    "torch_threads": 1,
+    "batch_size": 1,
+    "prompt_length": 16,
+    "repeats": 7,
+    "warmup_runs_discarded": 2,
+    "seed": 0,
+    "timing": "whole generate() call divided by new tokens, including the prompt pass"
+  },
+  "results": [
+    {
+      "new_tokens": 32,
+      "final_length": 48,
+      "with_cache": {
+        "new_tokens": 32,
+        "ms_per_token_median": 0.411746093959664,
+        "ms_per_token_min": 0.40821356196829583,
+        "ms_per_token_max": 0.4341497497080127
+      },
+      "without_cache": {
+        "new_tokens": 32,
+        "ms_per_token_median": 0.5977981873002136,
+        "ms_per_token_min": 0.5928567497903714,
+        "ms_per_token_max": 0.6114674361015204
+      },
+      "speedup": 1.4518612224133836,
+      "tokens_processed_with_cache": 47,
+      "tokens_processed_without_cache": 1008
+    },
+    {
+      "new_tokens": 128,
+      "final_length": 144,
+      "with_cache": {
+        "new_tokens": 128,
+        "ms_per_token_median": 0.41917968746929546,
+        "ms_per_token_min": 0.40962662524179905,
+        "ms_per_token_max": 0.44583235921891173
+      },
+      "without_cache": {
+        "new_tokens": 128,
+        "ms_per_token_median": 0.8328671874551219,
+        "ms_per_token_min": 0.825440429707669,
+        "ms_per_token_max": 1.010599937671941
+      },
+      "speedup": 1.98689777284623,
+      "tokens_processed_with_cache": 143,
+      "tokens_processed_without_cache": 10176
+    },
+    {
+      "new_tokens": 512,
+      "final_length": 528,
+      "with_cache": {
+        "new_tokens": 512,
+        "ms_per_token_median": 0.4332865410106024,
+        "ms_per_token_min": 0.42743497658648266,
+        "ms_per_token_max": 0.4599651698526941
+      },
+      "without_cache": {
+        "new_tokens": 512,
+        "ms_per_token_median": 4.601929361342627,
+        "ms_per_token_min": 4.534571695330669,
+        "ms_per_token_max": 4.6913900546314835
+      },
+      "speedup": 10.620983865801684,
+      "tokens_processed_with_cache": 527,
+      "tokens_processed_without_cache": 139008
+    },
+    {
+      "new_tokens": 1024,
+      "final_length": 1040,
+      "with_cache": {
+        "new_tokens": 1024,
+        "ms_per_token_median": 0.45103027343884605,
+        "ms_per_token_min": 0.44119238282291917,
+        "ms_per_token_max": 0.5099667567947108
+      },
+      "without_cache": {
+        "new_tokens": 1024,
+        "ms_per_token_median": 17.176421183592083,
+        "ms_per_token_min": 16.939202718788238,
+        "ms_per_token_max": 18.001531982463348
+      },
+      "speedup": 38.0826347921876,
+      "tokens_processed_with_cache": 1039,
+      "tokens_processed_without_cache": 540160
+    }
+  ],
+  "cache_memory": {
+    "formula": "2 * layers * batch * kv_heads * max_length * head_dim * bytes_per_value",
+    "tiny_float32": {
+      "bytes_per_token": 768,
+      "max_length": 1040,
+      "total_bytes": 798720
+    },
+    "qwen2_config_defaults_float16_computed_not_measured": {
+      "layers": 32,
+      "kv_heads": 32,
+      "head_dim": 128,
+      "bytes_per_token": 524288,
+      "max_length": 4096,
+      "total_gib": 2.0
+    }
+  }
+}

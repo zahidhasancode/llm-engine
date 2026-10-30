@@ -21,6 +21,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from engine.cache import KVCache
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -68,9 +70,9 @@ class RMSNorm(nn.Module):
 
 
 def rotary_embedding(
-    config: ModelConfig, seq_len: int, device: torch.device, dtype: torch.dtype
+    config: ModelConfig, start: int, seq_len: int, device: torch.device, dtype: torch.dtype
 ) -> tuple[Tensor, Tensor]:
-    """Return the cos and sin tables, each of shape (T, D).
+    """Return the cos and sin tables for positions start..start+T, each of shape (T, D).
 
     Every position gets a set of angles. Each pair of values in a head is rotated by
     its own frequency, from fast to slow, so positions are encoded at many scales.
@@ -79,7 +81,7 @@ def rotary_embedding(
     inv_freq = 1.0 / (
         config.rope_theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
     )
-    positions = torch.arange(seq_len, device=device, dtype=torch.float32)
+    positions = torch.arange(start, start + seq_len, device=device, dtype=torch.float32)
     angles = torch.outer(positions, inv_freq)  # (T, D/2)
     angles = torch.cat((angles, angles), dim=-1)  # (T, D)
     return angles.cos().to(dtype), angles.sin().to(dtype)
@@ -116,7 +118,9 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(config.hidden_size, config.num_kv_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    def forward(
+        self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, layer: int
+    ) -> Tensor:
         batch, seq_len, _ = x.shape
 
         # Split into heads: (B, T, H*D) -> (B, H, T, D).
@@ -128,14 +132,23 @@ class Attention(nn.Module):
         q = apply_rotary(q, cos, sin)
         k = apply_rotary(k, cos, sin)
 
+        # From here K and V cover every token so far, while Q covers only the new ones.
+        if cache is not None:
+            k, v = cache.update(layer, k, v)
+        total = k.shape[2]
+        past = total - seq_len
+
         # Copy each K and V head so that every query head has a partner.
         k = k.repeat_interleave(self.queries_per_kv, dim=1)
         v = v.repeat_interleave(self.queries_per_kv, dim=1)
 
-        scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, T, T)
+        scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, T, total)
 
-        # A token may only look at itself and earlier tokens.
-        future = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device), 1)
+        # A token may only look at itself and earlier tokens. New token i sits at
+        # position past + i, so everything beyond that column is hidden from it.
+        future = torch.triu(
+            torch.ones(seq_len, total, dtype=torch.bool, device=x.device), past + 1
+        )
         scores = scores.masked_fill(future, -torch.inf)
 
         # Softmax in float32 for the same overflow reason as RMSNorm.
@@ -166,8 +179,10 @@ class DecoderBlock(nn.Module):
         self.norm_mlp = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = MLP(config)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
-        x = x + self.attn(self.norm_attn(x), cos, sin)
+    def forward(
+        self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, layer: int
+    ) -> Tensor:
+        x = x + self.attn(self.norm_attn(x), cos, sin, cache, layer)
         x = x + self.mlp(self.norm_mlp(x))
         return x
 
@@ -183,10 +198,28 @@ class Qwen2(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.tok_embed.weight
 
-    def forward(self, input_ids: Tensor) -> Tensor:
-        """Map token ids of shape (B, T) to logits of shape (B, T, vocab_size)."""
+    def forward(
+        self, input_ids: Tensor, cache: KVCache | None = None, last_token_only: bool = False
+    ) -> Tensor:
+        """Map token ids of shape (B, T) to logits of shape (B, T, vocab_size).
+
+        With a cache, input_ids holds only the tokens the cache has not seen yet.
+        With last_token_only, logits have shape (B, 1, vocab_size), which is all that
+        generation needs.
+        """
+        batch, seq_len = input_ids.shape
+        start = 0
+        if cache is not None:
+            cache.check_fits(batch, seq_len)
+            start = cache.length
+
         x = self.tok_embed(input_ids)
-        cos, sin = rotary_embedding(self.config, input_ids.shape[1], x.device, x.dtype)
-        for block in self.blocks:
-            x = block(x, cos, sin)
+        cos, sin = rotary_embedding(self.config, start, seq_len, x.device, x.dtype)
+        for layer, block in enumerate(self.blocks):
+            x = block(x, cos, sin, cache, layer)
+
+        if cache is not None:
+            cache.advance(seq_len)
+        if last_token_only:
+            x = x[:, -1:]
         return self.lm_head(self.norm(x))
