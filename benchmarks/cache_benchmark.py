@@ -81,7 +81,7 @@ def measure(model: Qwen2, ids: torch.Tensor, new_tokens: int, use_cache: bool) -
 
 
 def bytes_per_token(config: ModelConfig, dtype: torch.dtype) -> int:
-    return KVCache(config, batch_size=1, max_length=1, dtype=dtype).nbytes
+    return KVCache(config, num_slots=1, max_length=1, dtype=dtype).nbytes
 
 
 def main() -> None:

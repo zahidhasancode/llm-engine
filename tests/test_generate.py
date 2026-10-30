@@ -97,7 +97,7 @@ def test_cached_logits_match_a_full_forward_pass(split):
 
     pieces = [mine(piece, cache=cache) for piece in ids.split(split, dim=1)]
 
-    assert cache.length == 16
+    assert cache.lengths.tolist() == [16, 16]
     assert (torch.cat(pieces, dim=1) - mine(ids)).abs().max() < 1e-5
 
 
@@ -158,11 +158,11 @@ def test_cache_can_be_filled_exactly_but_not_past_capacity():
     mine = my_model(hf_model(hf_config()))
     cache = new_cache(mine, max_length=16)
     mine(random_ids(length=16), cache=cache)
-    assert cache.length == 16
+    assert cache.lengths.tolist() == [16, 16]
 
     with pytest.raises(ValueError, match="cache is full"):
         mine(random_ids(length=1), cache=cache)
-    assert cache.length == 16
+    assert cache.lengths.tolist() == [16, 16]
 
 
 @torch.no_grad()
@@ -171,7 +171,7 @@ def test_prompt_larger_than_cache_raises_before_writing():
     cache = new_cache(mine, max_length=4)
     with pytest.raises(ValueError, match="cache is full"):
         mine(random_ids(length=5), cache=cache)
-    assert cache.length == 0
+    assert cache.lengths.tolist() == [0, 0]
 
 
 @torch.no_grad()

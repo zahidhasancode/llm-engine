@@ -70,21 +70,31 @@ class RMSNorm(nn.Module):
 
 
 def rotary_embedding(
-    config: ModelConfig, start: int, seq_len: int, device: torch.device, dtype: torch.dtype
+    config: ModelConfig, positions: Tensor, dtype: torch.dtype
 ) -> tuple[Tensor, Tensor]:
-    """Return the cos and sin tables for positions start..start+T, each of shape (T, D).
+    """Return cos and sin tables of shape (B, 1, T, D) for positions of shape (B, T).
 
     Every position gets a set of angles. Each pair of values in a head is rotated by
     its own frequency, from fast to slow, so positions are encoded at many scales.
+    The 1 lines up with the heads dimension, so each row can sit at its own position.
     """
     dim = config.head_dim
-    inv_freq = 1.0 / (
-        config.rope_theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
-    )
-    positions = torch.arange(start, start + seq_len, device=device, dtype=torch.float32)
-    angles = torch.outer(positions, inv_freq)  # (T, D/2)
-    angles = torch.cat((angles, angles), dim=-1)  # (T, D)
+    steps = torch.arange(0, dim, 2, device=positions.device, dtype=torch.float32)
+    inv_freq = 1.0 / (config.rope_theta ** (steps / dim))
+    angles = positions[:, None, :, None].float() * inv_freq  # (B, 1, T, D/2)
+    angles = torch.cat((angles, angles), dim=-1)  # (B, 1, T, D)
     return angles.cos().to(dtype), angles.sin().to(dtype)
+
+
+def future_mask(positions: Tensor) -> Tensor:
+    """Mark what each new token must not see, with shape (B, 1, T, total).
+
+    A token may only look at itself and earlier tokens. Comparing every stored position
+    with each token's own position gives the causal mask, and it also hides the unused
+    positions of any row shorter than the longest one.
+    """
+    stored = torch.arange(positions.max() + 1, device=positions.device)
+    return stored > positions[:, None, :, None]
 
 
 def rotate_half(x: Tensor) -> Tensor:
@@ -119,7 +129,13 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(config.num_heads * self.head_dim, config.hidden_size, bias=False)
 
     def forward(
-        self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, layer: int
+        self,
+        x: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        future: Tensor,
+        cache: KVCache | None,
+        layer: int,
     ) -> Tensor:
         batch, seq_len, _ = x.shape
 
@@ -135,18 +151,10 @@ class Attention(nn.Module):
         # From here K and V cover every token so far, while Q covers only the new ones.
         if cache is not None:
             k, v = cache.update(layer, k, v)
-        total = k.shape[2]
-        past = total - seq_len
 
         # Copy each K and V head so that every query head has a partner.
         k = k.repeat_interleave(self.queries_per_kv, dim=1)
         v = v.repeat_interleave(self.queries_per_kv, dim=1)
-
-        # A token may only look at itself and earlier tokens. New token i sits at
-        # position past + i, so everything beyond that column is hidden from it.
-        future = torch.triu(
-            torch.ones(seq_len, total, dtype=torch.bool, device=x.device), past + 1
-        )
 
         out = self.attend(q, k, v, future)
         return self.o_proj(out.transpose(1, 2).reshape(batch, seq_len, -1))  # (B, T, H*D)
@@ -183,9 +191,15 @@ class DecoderBlock(nn.Module):
         self.mlp = MLP(config)
 
     def forward(
-        self, x: Tensor, cos: Tensor, sin: Tensor, cache: KVCache | None, layer: int
+        self,
+        x: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        future: Tensor,
+        cache: KVCache | None,
+        layer: int,
     ) -> Tensor:
-        x = x + self.attn(self.norm_attn(x), cos, sin, cache, layer)
+        x = x + self.attn(self.norm_attn(x), cos, sin, future, cache, layer)
         x = x + self.mlp(self.norm_mlp(x))
         return x
 
@@ -202,27 +216,36 @@ class Qwen2(nn.Module):
             self.lm_head.weight = self.tok_embed.weight
 
     def forward(
-        self, input_ids: Tensor, cache: KVCache | None = None, last_token_only: bool = False
+        self,
+        input_ids: Tensor,
+        cache: KVCache | None = None,
+        last_token_only: bool = False,
+        slots: Tensor | None = None,
     ) -> Tensor:
         """Map token ids of shape (B, T) to logits of shape (B, T, vocab_size).
 
-        With a cache, input_ids holds only the tokens the cache has not seen yet.
+        With a cache, input_ids holds only the tokens the cache has not seen yet, and
+        slots says which slot each row belongs to, in order. Without slots, row i is
+        slot i. Slots can be at different lengths, but each row adds the same T tokens.
         With last_token_only, logits have shape (B, 1, vocab_size), which is all that
         generation needs.
         """
         batch, seq_len = input_ids.shape
-        start = 0
-        if cache is not None:
-            cache.check_fits(batch, seq_len)
-            start = cache.length
+        if cache is None:
+            positions = torch.arange(seq_len).expand(batch, seq_len)
+        else:
+            slots = cache.all_slots if slots is None else slots
+            positions = cache.begin(slots, batch, seq_len)
+        positions = positions.to(input_ids.device)
 
         x = self.tok_embed(input_ids)
-        cos, sin = rotary_embedding(self.config, start, seq_len, x.device, x.dtype)
+        cos, sin = rotary_embedding(self.config, positions, x.dtype)
+        future = future_mask(positions)
         for layer, block in enumerate(self.blocks):
-            x = block(x, cos, sin, cache, layer)
+            x = block(x, cos, sin, future, cache, layer)
 
         if cache is not None:
-            cache.advance(seq_len)
+            cache.advance(slots, seq_len)
         if last_token_only:
             x = x[:, -1:]
         return self.lm_head(self.norm(x))

@@ -41,7 +41,7 @@ from transformers import AutoTokenizer, DynamicCache, GenerationConfig, Qwen2For
 from engine.cache import KVCache
 from engine.generate import generate
 from engine.loader import load_pretrained
-from engine.model import Attention, Qwen2, rotary_embedding
+from engine.model import Attention, Qwen2, future_mask, rotary_embedding
 from engine.sampling import SamplingParams
 
 PARITY_TOLERANCE = 1e-4
@@ -302,13 +302,8 @@ def step_overheads(model: Qwen2, cached_tokens: int, device: str) -> dict:
     target = torch.device(device)
     key = torch.empty(1, config.num_kv_heads, cached_tokens, config.head_dim, device=device, dtype=dtype)
     repeats_needed = config.num_heads // config.num_kv_heads
+    positions = torch.tensor([[cached_tokens]], device=target)
     per_layer = {
-        "mask": median_ms(
-            lambda: torch.triu(
-                torch.ones(1, cached_tokens, dtype=torch.bool, device=target), cached_tokens
-            ),
-            device,
-        ),
         "repeat_key_and_value": median_ms(
             lambda: (
                 key.repeat_interleave(repeats_needed, dim=1),
@@ -317,15 +312,18 @@ def step_overheads(model: Qwen2, cached_tokens: int, device: str) -> dict:
             device,
         ),
     }
-    rotary = median_ms(
-        lambda: rotary_embedding(config, cached_tokens, 1, target, dtype), device
-    )
+    once_per_step = {
+        "rotary": median_ms(lambda: rotary_embedding(config, positions, dtype), device),
+        "mask": median_ms(lambda: future_mask(positions), device),
+    }
     return {
         "cached_tokens": cached_tokens,
         "layers": config.num_layers,
-        "rotary_ms_once_per_step": rotary,
+        "ms_once_per_step": once_per_step,
         "ms_per_layer": per_layer,
-        "ms_per_step_total": rotary + config.num_layers * sum(per_layer.values()),
+        "ms_per_step_total": (
+            sum(once_per_step.values()) + config.num_layers * sum(per_layer.values())
+        ),
         "note": "Each piece timed alone with GPU synchronisation, so this is an upper estimate",
     }
 
