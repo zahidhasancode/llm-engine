@@ -153,11 +153,11 @@ class Attention(nn.Module):
 
     def attend(self, q: Tensor, k: Tensor, v: Tensor, future: Tensor) -> Tensor:
         """Scaled dot-product attention. Returns one mixed value per query, (B, H, T, D)."""
-        scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, T, total)
+        # In float32, because float16 stops at 65504. Dot products can pass that on real
+        # weights, and they would become inf, which softmax turns into NaN.
+        scores = (q.float() @ k.float().transpose(-2, -1)) * self.scale  # (B, H, T, total)
         scores = scores.masked_fill(future, -torch.inf)
-
-        # Softmax in float32 for the same overflow reason as RMSNorm.
-        weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+        weights = F.softmax(scores, dim=-1).to(q.dtype)
         return weights @ v
 
 

@@ -24,6 +24,7 @@ PYTHONPATH=. python benchmarks/real_model.py --model-path DIR --output FILE
 import argparse
 import gc
 import json
+import math
 import platform
 import statistics
 import subprocess
@@ -40,7 +41,7 @@ from transformers import AutoTokenizer, DynamicCache, GenerationConfig, Qwen2For
 from engine.cache import KVCache
 from engine.generate import generate
 from engine.loader import load_pretrained
-from engine.model import Attention, Qwen2
+from engine.model import Attention, Qwen2, rotary_embedding
 from engine.sampling import SamplingParams
 
 PARITY_TOLERANCE = 1e-4
@@ -97,12 +98,21 @@ class SdpaAttention(Attention):
         return F.scaled_dot_product_attention(q, k, v, attn_mask=~future)
 
 
-class NativeSoftmaxAttention(Attention):
-    """My attention, except that softmax stays in the model's dtype."""
+class Float16ScoresAttention(Attention):
+    """My attention with no float32 step. Faster or not, it can overflow, so it is only a probe."""
 
     def attend(self, q: Tensor, k: Tensor, v: Tensor, future: Tensor) -> Tensor:
-        scores = (q @ k.transpose(-2, -1)) * self.scale
+        scores = (q * self.scale) @ k.transpose(-2, -1)
         return scores.masked_fill(future, -torch.inf).softmax(dim=-1) @ v
+
+
+class SdpaNoMaskAttention(SdpaAttention):
+    """Built-in attention that skips the mask when nothing is hidden, as in every decode step."""
+
+    def attend(self, q: Tensor, k: Tensor, v: Tensor, future: Tensor) -> Tensor:
+        if future.any():
+            return super().attend(q, k, v, future)
+        return F.scaled_dot_product_attention(q, k, v)
 
 
 def with_attention(model: Qwen2, attention: type[Attention]) -> Qwen2:
@@ -132,6 +142,11 @@ def prompt_of_length(tokenizer, length: int, device: str) -> Tensor:
 # Parity
 
 
+def json_number(value: float) -> float | None:
+    """JSON has no NaN or inf, so a broken value is saved as null."""
+    return value if math.isfinite(value) else None
+
+
 def logits_of(model, ids: Tensor) -> Tensor:
     output = model(ids)
     return output if isinstance(output, Tensor) else output.logits
@@ -143,8 +158,8 @@ def compare_logits(first, second, ids: Tensor) -> dict:
     second_logits = logits_of(second, ids)
     return {
         "tokens": ids.shape[1],
-        "max_abs_difference": (first_logits - second_logits).abs().max().item(),
-        "largest_logit": second_logits.abs().max().item(),
+        "max_abs_difference": json_number((first_logits - second_logits).abs().max().item()),
+        "largest_logit": json_number(second_logits.abs().max().item()),
         "top_token_agreement": (
             (first_logits.argmax(-1) == second_logits.argmax(-1)).float().mean().item()
         ),
@@ -154,8 +169,13 @@ def compare_logits(first, second, ids: Tensor) -> dict:
 @torch.no_grad()
 def top_two(model, ids: Tensor) -> dict:
     """The two best first tokens. A small gap means rounding alone can swap them."""
-    values, tokens = logits_of(model, ids)[0, -1].topk(2)
-    return {"tokens": tokens.tolist(), "logits": values.tolist()}
+    logits = logits_of(model, ids)
+    values, tokens = logits[0, -1].topk(2)
+    return {
+        "finite": logits.isfinite().all().item(),
+        "tokens": tokens.tolist(),
+        "logits": [json_number(value) for value in values.tolist()],
+    }
 
 
 def check_parity(path: str, tokenizer, device: str) -> dict:
@@ -263,6 +283,53 @@ def forward_only_hf(model: Qwen2ForCausalLM, ids: Tensor, new_tokens: int) -> Te
     return torch.cat(tokens, dim=1)[0]
 
 
+def median_ms(work: Callable[[], object], device: str, repeats: int = 200) -> float:
+    times = []
+    for _ in range(repeats):
+        synchronise(device)
+        start = time.perf_counter()
+        work()
+        synchronise(device)
+        times.append(time.perf_counter() - start)
+    return statistics.median(times) * 1000
+
+
+@torch.no_grad()
+def step_overheads(model: Qwen2, cached_tokens: int, device: str) -> dict:
+    """What one decode step spends on work other than the attention product itself."""
+    config = model.config
+    dtype = model.tok_embed.weight.dtype
+    target = torch.device(device)
+    key = torch.empty(1, config.num_kv_heads, cached_tokens, config.head_dim, device=device, dtype=dtype)
+    repeats_needed = config.num_heads // config.num_kv_heads
+    per_layer = {
+        "mask": median_ms(
+            lambda: torch.triu(
+                torch.ones(1, cached_tokens, dtype=torch.bool, device=target), cached_tokens
+            ),
+            device,
+        ),
+        "repeat_key_and_value": median_ms(
+            lambda: (
+                key.repeat_interleave(repeats_needed, dim=1),
+                key.repeat_interleave(repeats_needed, dim=1),
+            ),
+            device,
+        ),
+    }
+    rotary = median_ms(
+        lambda: rotary_embedding(config, cached_tokens, 1, target, dtype), device
+    )
+    return {
+        "cached_tokens": cached_tokens,
+        "layers": config.num_layers,
+        "rotary_ms_once_per_step": rotary,
+        "ms_per_layer": per_layer,
+        "ms_per_step_total": rotary + config.num_layers * sum(per_layer.values()),
+        "note": "Each piece timed alone with GPU synchronisation, so this is an upper estimate",
+    }
+
+
 def summarise(runs: list[dict]) -> dict:
     summary = {}
     for metric in (
@@ -309,8 +376,11 @@ def benchmark_prompt(
         "mine_with_sdpa_generate": (
             models["mine_sdpa"], run_mine(models["mine_sdpa"])
         ),
-        "mine_with_native_softmax_generate": (
-            models["mine_native_softmax"], run_mine(models["mine_native_softmax"])
+        "mine_with_sdpa_no_mask_generate": (
+            models["mine_sdpa_no_mask"], run_mine(models["mine_sdpa_no_mask"])
+        ),
+        "mine_with_float16_scores_generate": (
+            models["mine_float16_scores"], run_mine(models["mine_float16_scores"])
         ),
         "hf_generate_sdpa": (models["sdpa"], run_hf(models["sdpa"])),
         "hf_generate_eager": (models["eager"], run_hf(models["eager"])),
@@ -370,7 +440,8 @@ def run_benchmark(
         "eager": load_hf(path, dtype, "eager", device),
     }
     models["mine_sdpa"] = with_attention(models["mine"], SdpaAttention)
-    models["mine_native_softmax"] = with_attention(models["mine"], NativeSoftmaxAttention)
+    models["mine_sdpa_no_mask"] = with_attention(models["mine"], SdpaNoMaskAttention)
+    models["mine_float16_scores"] = with_attention(models["mine"], Float16ScoresAttention)
     results = [
         benchmark_prompt(
             models, prompt_of_length(tokenizer, length, device), new_tokens, repeats, warmups, device
@@ -386,6 +457,9 @@ def run_benchmark(
             ).nbytes / 2**20
             for result in results
         },
+        "my_step_overheads": step_overheads(
+            models["mine"], results[-1]["prompt_tokens"] + new_tokens // 2, device
+        ),
         "prompts": results,
     }
 
@@ -468,7 +542,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"decode {engine['decode_tokens_per_s']['median']:8.2f} tok/s"
             )
 
-    return 0 if result["parity"]["eager"]["within_tolerance"] else 1
+    # A NaN run still produces timings, so it has to be failed on purpose.
+    finite = all(
+        prompt["first_token_choice"]["mine"]["finite"] for prompt in result["benchmark"]["prompts"]
+    )
+    return 0 if finite and result["parity"]["eager"]["within_tolerance"] else 1
 
 
 if __name__ == "__main__":

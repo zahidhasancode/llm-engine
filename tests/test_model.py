@@ -17,7 +17,7 @@ from engine.loader import (
     load_pretrained,
     map_hf_key,
 )
-from engine.model import ModelConfig, Qwen2, RMSNorm
+from engine.model import Attention, ModelConfig, Qwen2, RMSNorm
 from tiny import hf_config, hf_model, my_model, random_ids
 
 TOLERANCE = 1e-4
@@ -84,6 +84,25 @@ def test_future_tokens_do_not_change_earlier_logits():
     with torch.no_grad():
         assert torch.equal(mine(ids)[:, :-1], mine(changed)[:, :-1])
         assert not torch.equal(mine(ids)[:, -1], mine(changed)[:, -1])
+
+
+@pytest.mark.parametrize("value", [100.0, 300.0])
+def test_attention_survives_float16_overflow(value):
+    """Raw dot products reach 80000 and 720000, past float16's largest value of 65504."""
+    attention = Attention(ModelConfig(97, 32, 64, 1, num_heads=4, num_kv_heads=4)).half()
+    q = k = torch.full((1, 4, 2, 8), value, dtype=torch.float16)
+    v = torch.ones(1, 4, 2, 8, dtype=torch.float16)
+    future = torch.tensor([[False, True], [False, False]])
+    assert attention.attend(q, k, v, future).isfinite().all()
+
+
+@torch.no_grad()
+def test_float16_model_with_large_projections_stays_finite():
+    mine = my_model(hf_model(hf_config())).half()
+    for block in mine.blocks:
+        block.attn.q_proj.weight *= 300
+        block.attn.k_proj.weight *= 300
+    assert mine(random_ids()).isfinite().all()
 
 
 def test_rmsnorm_matches_hugging_face():
