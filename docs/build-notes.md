@@ -171,3 +171,45 @@ bounded by `max_tokens`. A test freezes the event loop and checks tokens keep be
 Tokens are not characters. An emoji can span several tokens, and decoding them apart gives broken
 output. Spacing can also depend on neighbouring tokens. So you decode a window of recent tokens,
 emit only the new text, and wait while the text ends in an incomplete character.
+
+## Step 9: load test tool
+
+**What was built.** `scripts/loadtest.py` drives any OpenAI-compatible server with streaming chat
+completions. It supports Poisson arrivals at a set rate and a fixed number of concurrent users,
+both with a fixed seed. It reports time to first token, time between tokens, end-to-end latency
+(p50, p95, p99), total tokens per second and errors, and saves raw per-request data as JSON.
+`data/prompts.jsonl` holds 200 real prompts from Dolly 15k, with 120 short, 60 medium and 20 long.
+
+**Why.** The same tool must test my engine and vLLM, so nothing in it knows which server it talks
+to. Its numbers are proven against a fake server told to use known delays.
+
+**Open loop and closed loop.** Poisson is an open loop: arrivals ignore the server, like real users,
+so queues can build without limit and saturation is visible. Fixed users are a closed loop: a slow
+server slows the arrivals down, which hides overload but gives a steady, repeatable load.
+
+**Coordinated omission.** In Poisson mode latency starts at the scheduled arrival time, not the
+send time. If the client falls behind, the delay still counts. Measuring from the send time would
+hide exactly the slowness a load test exists to find.
+
+**Main tradeoff.** A Python client is simple, but it shares CPU with the server on a small machine
+and adds its own delay at high rates. The same client is used for every system, so comparisons stay
+fair, but absolute time between tokens at high load includes client overhead. Also, a server that
+sends several tokens in one chunk would look like one long gap, so that metric is per chunk.
+
+### Interview questions
+
+**1. What is coordinated omission?**
+A load generator that waits for each reply before sending the next sends less just when the server
+is slow, so it under-samples the worst moments. The fix is to schedule arrivals in advance and
+measure latency from the scheduled time, so waiting caused by the server is always counted.
+
+**2. Why report p99 rather than the mean?**
+Latency has a long tail, and the mean hides it. If one request in a hundred takes ten seconds,
+the mean barely moves, yet a user making many requests will hit that often. The tail also shows
+saturation first, because queueing delay hits the unluckiest requests hardest.
+
+**3. How do you know a load test tool is telling the truth?**
+Point it at a fake server with known behaviour and check that it reports those delays. Then test
+the arithmetic on hand-made records with answers worked out on paper. Planted bugs showed that the
+fake server alone was not enough: it could not tell latency measured from the send time from
+latency measured from the schedule, so exact tests were added.
