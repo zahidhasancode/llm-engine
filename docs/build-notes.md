@@ -45,3 +45,44 @@ uninitialised memory, and why a released slot is cleared.
 All rows in a pass are read to the same width, so attention compares every query against as many
 stored positions as the longest row. The mask removes those positions from the result but not from
 the arithmetic. Decode time depends on the longest active slot.
+
+## Step 6: continuous batching
+
+**What was built.** `engine/scheduler.py` has a waiting queue and active slots. Each `step()`
+admits waiting requests into free slots, runs prompt tokens up to a budget, then runs one decode
+pass for every request past its prefill. A finished request frees its slot in that same step.
+
+**Why.** Static batching holds every slot until the longest request ends. With continuous
+batching a slot goes back to work the moment it is free, so short requests leave early and the
+GPU is not left running half-empty batches.
+
+**Mixing prefill and decode.** A prompt is cut into chunks of at most `prefill_tokens_per_step`
+tokens, oldest request first, and a decode pass runs after the chunks of every step. A request
+that just finished prefill also decodes in that step, so its first two tokens can come together.
+
+**Main tradeoff.** The budget trades time to first token against smooth streaming. A large budget
+gets a long prompt through quickly, but everyone decoding stalls for that long between tokens. A
+small budget keeps decoding smooth but a long prompt waits many steps. Two extreme choices are
+worse: prefill-first freezes running streams, and decode-first can starve new requests under steady
+load.
+
+**Fairness.** Admission and prefill are strictly first in, first out, and prefill gets its budget
+on every step, so no request can be starved. The cost is that one long prompt at the front delays
+the prompts behind it.
+
+### Interview questions
+
+**1. What does continuous batching change compared with static batching?**
+Batch membership changes between model steps instead of once per batch. Finished requests leave
+immediately and waiting ones take their slots, so a short request never waits for a long
+neighbour and slots spend less time idle.
+
+**2. Why cut prompts into chunks?**
+A forward pass cannot be interrupted, so one huge prompt would block every decoding request for
+its whole duration. Chunks put a bound on that stall: at most one budget's worth of prefill runs
+between decode passes.
+
+**3. How do you know no request is starved?**
+Admission is first in, first out, and every step gives prefill a budget even when decoding is busy.
+So a request's queue position only moves forward. The tests push a stream of short requests past a
+long one and check that the long one still finishes, and that requests start in arrival order.
