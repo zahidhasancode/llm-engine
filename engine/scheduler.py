@@ -22,7 +22,8 @@ Everything is synchronous and in-process. There is no network in this file.
 """
 
 import heapq
-from collections import deque
+import time
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 import torch
@@ -56,6 +57,24 @@ class Event:
     token: int | None = None
     finish_reason: str | None = None
     error: str | None = None
+
+
+@dataclass
+class Stats:
+    """Running totals, so a load test can measure where the time went."""
+
+    steps: int = 0
+    prefill_passes: int = 0
+    prefill_tokens: int = 0
+    decode_passes: int = 0
+    decode_rows: int = 0
+    tokens_generated: int = 0
+    step_seconds: float = 0.0
+    prefill_seconds: float = 0.0
+    decode_seconds: float = 0.0
+    sampling_seconds: float = 0.0
+    finished: Counter = field(default_factory=Counter)
+    refused: Counter = field(default_factory=Counter)
 
 
 @dataclass(eq=False)
@@ -101,6 +120,7 @@ class Scheduler:
         self.decoding: dict[int, _Request] = {}  # by slot
         self.free_slots = list(range(num_slots))  # a heap, so the lowest slot is used first
         self.requests: dict[int, _Request] = {}  # every unfinished request, by id
+        self.stats = Stats()
         self._next_id = 0
         self._ready: list[Event] = []
 
@@ -114,13 +134,18 @@ class Scheduler:
         Raises InvalidRequest or PromptTooLong for a bad request, and QueueFull when the
         waiting queue is at its limit. Neither leaves anything behind.
         """
-        self._validate(prompt, params)
-        if len(self.waiting) >= self.max_waiting:
-            raise QueueFull(f"waiting queue is full at {self.max_waiting} requests")
+        try:
+            self._validate(prompt, params)
+            if len(self.waiting) >= self.max_waiting:
+                raise QueueFull(f"waiting queue is full at {self.max_waiting} requests")
+        except (InvalidRequest, QueueFull) as error:
+            self.stats.refused[type(error).__name__] += 1
+            raise
 
         request = _Request(self._next_id, prompt.to(self.device), params)
         self._next_id += 1
         if params.max_tokens == 0:
+            self.stats.finished["length"] += 1
             self._ready.append(Event(request.id, finish_reason="length"))
         else:
             self.requests[request.id] = request
@@ -154,10 +179,13 @@ class Scheduler:
     @torch.no_grad()
     def step(self) -> list[Event]:
         """Advance every request by one scheduling step, and return what happened."""
+        start = time.perf_counter()
         events = []
         self._admit()
         self._prefill(events)
         self._decode(events)
+        self.stats.steps += 1
+        self.stats.step_seconds += time.perf_counter() - start
         # Cancellations and failures go out with this step, not one step late.
         ready, self._ready = self._ready, []
         return ready + events
@@ -182,7 +210,10 @@ class Scheduler:
                 self._fail(request, error)
 
     def _forward(self, input_ids: Tensor, slots: list[int]) -> tuple[Tensor, list[bool]]:
-        """Run the model, and say which rows came back with usable logits."""
+        """Run the model, and say which rows came back with usable logits.
+
+        Reading the result back also waits for the GPU, so time around this call is real.
+        """
         logits = self.model(input_ids, self.cache, True, torch.tensor(slots))[:, -1]
         return logits, logits.isfinite().all(dim=-1).tolist()
 
@@ -191,11 +222,15 @@ class Scheduler:
         while budget > 0 and self.prefilling:
             request = self.prefilling[0]
             chunk = request.prompt[request.prefilled : request.prefilled + budget]
+            start = time.perf_counter()
             try:
                 logits, finite = self._forward(chunk[None], [request.slot])
             except Exception as error:
                 self._fail(request, error)
                 continue
+            self.stats.prefill_seconds += time.perf_counter() - start
+            self.stats.prefill_passes += 1
+            self.stats.prefill_tokens += chunk.numel()
             budget -= chunk.numel()
             request.prefilled += chunk.numel()
             if request.prefilled == request.prompt.numel():
@@ -212,11 +247,15 @@ class Scheduler:
         input_ids = torch.tensor(
             [[request.generated[-1]] for request in requests], device=self.device
         )
+        start = time.perf_counter()
         try:
             logits, finite = self._forward(input_ids, slots)
         except Exception:
             self._decode_one_by_one(requests, input_ids, slots, events)
             return
+        self.stats.decode_seconds += time.perf_counter() - start
+        self.stats.decode_passes += 1
+        self.stats.decode_rows += len(slots)
         for row, (slot, request) in enumerate(zip(slots, requests)):
             if self._choose(request, logits[row], finite[row], events):
                 self.decoding.pop(slot, None)
@@ -245,11 +284,14 @@ class Scheduler:
         if not finite:
             self._fail(request, ValueError("the model produced NaN or inf logits"))
             return True
+        start = time.perf_counter()
         try:
             token = request.sampler.next_token(logits)
         except Exception as error:
             self._fail(request, error)
             return True
+        self.stats.sampling_seconds += time.perf_counter() - start
+        self.stats.tokens_generated += 1
 
         request.generated.append(token)
         reason = None
@@ -272,6 +314,7 @@ class Scheduler:
     ) -> None:
         """Take a request out of wherever it is, free its slot, and report the event."""
         (self._ready if events is None else events).append(event)
+        self.stats.finished[event.finish_reason] += 1
         del self.requests[request.id]
         if request.slot is None:
             self.waiting.remove(request)

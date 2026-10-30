@@ -129,3 +129,45 @@ is ever treated as valid.
 Nothing allocates while serving, so running out of memory mid-request cannot happen, and memory
 cannot grow. The price is internal waste, because every slot reserves the maximum length. A block
 allocator shares memory better but adds fragmentation and eviction to handle.
+
+## Step 8: API and streaming
+
+**What was built.** `engine/server.py` is a FastAPI server with `POST /v1/chat/completions`
+(OpenAI format, streaming and not), `/health` and `/metrics`. `engine/text.py` turns tokens into
+text without breaking characters. `engine/scheduler.py` now keeps running totals of where time goes.
+
+**Why this shape.** A model step blocks for tens of milliseconds, which would freeze an asyncio
+server. So the scheduler lives on its own thread and nothing else touches it. Handlers send it
+commands through a queue, and tokens come back through one asyncio queue per request. The engine
+only ever drops an event into a queue, so a slow client cannot slow the model. It can only grow its
+own queue, which holds at most `max_tokens` events.
+
+**Partial characters.** One character can span several tokens. Each new token is decoded with the
+tokens just before it, and text is held back while it ends in a replacement character. Anything
+still held at the end is flushed, so no bytes are lost.
+
+**Disconnects.** Streaming requests cancel when the web server closes their generator. A request
+waiting for a full reply has no such signal, so it asks whether the client is still there on a
+timer. The first version only checked when no event had arrived for 0.25 s. A busy request always
+has an event ready, so it never checked, and a real-socket test caught that.
+
+**Main tradeoff.** One engine thread keeps the design simple and free of locks, but in Python the
+web side and the engine share the interpreter lock, so each can briefly delay the other. Stop
+strings are refused with a 400 rather than ignored, because silently ignoring one would be worse.
+
+### Interview questions
+
+**1. Why does the scheduler run on a thread rather than as an asyncio task?**
+A forward pass blocks until the GPU finishes, and an asyncio task that blocks freezes every other
+request on that event loop, including health checks. A dedicated thread keeps the web side free,
+and PyTorch releases the interpreter lock during the heavy work, so both make progress.
+
+**2. How can a slow client not slow everyone down?**
+The model never writes to a socket. It puts events on an unbounded per-request queue, which cannot
+block, and a separate coroutine drains it at the client's pace. The memory that can pile up is
+bounded by `max_tokens`. A test freezes the event loop and checks tokens keep being generated.
+
+**3. Why can't you decode each token by itself when streaming?**
+Tokens are not characters. An emoji can span several tokens, and decoding them apart gives broken
+output. Spacing can also depend on neighbouring tokens. So you decode a window of recent tokens,
+emit only the new text, and wait while the text ends in an incomplete character.
