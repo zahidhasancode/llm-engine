@@ -49,6 +49,12 @@ class KVCache:
         self._rows = self._columns = self._reads = None
         self._total = 0
 
+    @staticmethod
+    def bytes_per_slot(config: "ModelConfig", max_length: int, dtype: torch.dtype) -> int:
+        """Memory one slot costs: keys and values, for every layer, head and position."""
+        values = config.num_layers * config.num_kv_heads * max_length * config.head_dim
+        return 2 * values * torch.finfo(dtype).bits // 8
+
     @property
     def nbytes(self) -> int:
         """Memory held by the cache. It is fixed from creation, however full the cache is."""

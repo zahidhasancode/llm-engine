@@ -86,3 +86,46 @@ between decode passes.
 Admission is first in, first out, and every step gives prefill a budget even when decoding is busy.
 So a request's queue position only moves forward. The tests push a stream of short requests past a
 long one and check that the long one still finishes, and that requests start in arrival order.
+
+## Step 7: memory limits and failures
+
+**What was built.** A cache memory budget, a limit on the waiting queue, cancellation that frees a
+slot at once, clear errors (`InvalidRequest`, `PromptTooLong`, `QueueFull`), and failure isolation.
+A request that raises, or whose logits turn NaN, ends with an error event while the rest carry on.
+If a shared decode pass raises, each row is run alone to find the one at fault. Lengths only move
+after a pass succeeds, so a retry simply overwrites what the failed pass wrote.
+
+**How memory scales.** The cache holds keys and values, so:
+
+    bytes = 2 * layers * slots * kv_heads * max_length * head_dim * bytes_per_value
+
+It grows linearly with slots and linearly with max_length, so together they multiply. Qwen2.5-1.5B
+in float16 costs 2 * 28 * 2 * 128 * 2 = 28,672 bytes per token position. So 8 slots of 4,096 tokens
+take about 940 MB, and 32 slots of the same length about 3.7 GB, on top of the weights.
+
+**Main tradeoff.** The cache is a fixed rectangle, so the budget is settled at startup: it decides
+how many slots exist, and "budget full" means every slot is busy and new requests wait. That makes
+memory completely predictable, and it can never grow. The cost is waste: a 20-token request holds a
+full `max_length` row. Sharing memory by real token use would need a block allocator, as vLLM has.
+It is not built here, which is an honest limit, not a hidden one.
+
+**Proof of no leaks.** After 1,000 random requests with cancellations and refusals, every slot is
+free, the cache tensors are the same objects at the same size and all zeros, and the count of live
+tensors has not grown.
+
+### Interview questions
+
+**1. Why reject at admission rather than letting requests fail later?**
+A request refused at the door costs nothing and tells the client straight away. One that fails
+after a long prefill has wasted GPU time and held a slot. It also gives the client a clear signal:
+a 400 means fix the request, and a 429 means try again later.
+
+**2. What happens to a batch if one request causes an exception?**
+The forward pass fails for everyone, so the scheduler retries each row alone and fails only the
+one that raises. That is safe because lengths advance only after success, so nothing half-written
+is ever treated as valid.
+
+**3. Why does a preallocated cache make memory safety simple, and what does it give up?**
+Nothing allocates while serving, so running out of memory mid-request cannot happen, and memory
+cannot grow. The price is internal waste, because every slot reserves the maximum length. A block
+allocator shares memory better but adds fragmentation and eviction to handle.
