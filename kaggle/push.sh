@@ -14,9 +14,10 @@ K="$ROOT/.venv/bin/kaggle"
 BUILD=$(mktemp -d)
 
 # Only these paths are uploaded. Anything else in the repository stays on this machine.
-mkdir -p "$BUILD/data/code/benchmarks"
+mkdir -p "$BUILD/data/code/benchmarks" "$BUILD/data/code/kaggle"
 cp -R "$ROOT/engine" "$ROOT/tests" "$ROOT/pyproject.toml" "$BUILD/data/code/"
 cp "$ROOT/benchmarks/real_model.py" "$BUILD/data/code/benchmarks/"
+cp "$ROOT/kaggle/push.sh" "$ROOT/kaggle/run.py" "$BUILD/data/code/kaggle/"
 find "$BUILD/data/code" -name __pycache__ -prune -exec rm -rf {} +
 
 cat > "$BUILD/data/dataset-metadata.json" <<EOF
