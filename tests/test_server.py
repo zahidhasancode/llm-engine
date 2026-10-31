@@ -16,7 +16,7 @@ import uvicorn
 from engine.generate import generate
 from engine.sampling import SamplingParams
 from engine.scheduler import Scheduler
-from engine.server import create_app
+from engine.server import EngineLoop, create_app
 from engine.text import IncrementalDecoder
 from tiny import hf_config, hf_model, my_model
 
@@ -49,7 +49,7 @@ class LiveServer:
     def __init__(self, model, tokenizer=None, slots=3, max_length=2000, stop_tokens=(), **settings):
         self.tokenizer = tokenizer or ByteTokenizer()
         self.scheduler = Scheduler(model, slots, max_length, **settings)
-        self.app = create_app(self.scheduler, self.tokenizer, "tiny", stop_tokens)
+        self.app = create_app(EngineLoop(self.scheduler), self.tokenizer, "tiny", stop_tokens)
         config = uvicorn.Config(self.app, host="127.0.0.1", port=0, log_level="error")
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, daemon=True)

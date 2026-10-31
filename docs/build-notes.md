@@ -213,3 +213,51 @@ Point it at a fake server with known behaviour and check that it reports those d
 the arithmetic on hand-made records with answers worked out on paper. Planted bugs showed that the
 fake server alone was not enough: it could not tell latency measured from the send time from
 latency measured from the schedule, so exact tests were added.
+
+## Step 10: full benchmark
+
+**What was built.** `benchmarks/serving_benchmark.py` starts each system as its own server process
+and raises the rate until it saturates, with the same prompts, seeds and load tool for all three.
+`scripts/hf_server.py` wraps Hugging Face `generate`, one request at a time, behind the same API.
+`benchmarks/step_time.py` and `benchmarks/vllm_step_time.py` measure a decode step, and
+`benchmarks/speed_gap.py` removes one thing at a time to split up the gap. `kaggle/serving_run.py`
+runs it all on a private T4 with pinned versions. vLLM has its own virtual environment, because it
+pins an older torch.
+
+**Why.** A benchmark only means something if everything except the system is the same, and a claim
+about why one system is slower needs a measurement. My first guess was wrong: I expected HTTP in a
+shared Python process to be a large cost, and it was 3–5%.
+
+**Results.** On one T4, in float16, serving 128 tokens per request: Hugging Face 32 tokens/s, my
+engine 229, vLLM 1,680. The main causes are that long prompts set the attention cost for every
+request in a pass, and that vLLM's Triton attention kernel makes each extra request about four times
+cheaper than mine. With its FLEX backend, vLLM is no faster than my engine at batches of 16 or more.
+
+**Measuring a step on a closed system.** vLLM does not expose its steps, so I time a run with 1 token
+and a run with 1 + N tokens and divide the difference by N. Prefill cancels out, and the same method
+works on both engines. Prefix caching must be off, or the second run skips its prefill.
+
+**Main tradeoff.** vLLM's prefix cache is off, because the prompts repeat and it would measure
+repetition instead of serving. That makes the test fair between systems but unlike a normal vLLM
+deployment. It is stated in the README rather than hidden.
+
+### Interview questions
+
+**1. Your engine is 7 times slower than vLLM. Why?**
+I measured it by removing one thing at a time. HTTP costs only 3–5%. Decode passes take 85% of the
+time. My cache is a rectangle, so one long prompt makes every row attend over that length: at 64
+slots, real prompts give 238 tokens/s and short prompts 720. vLLM's Triton kernel also grows far more
+slowly with batch size: going from 16 to 128 requests, each one adds 0.3 ms per step, against 1.2 ms
+in mine. When I switched vLLM to its FLEX backend, it was no faster than my engine.
+
+**2. How do you tell a saturated system from a slow one?**
+Under an open loop, a saturated system falls behind arrivals, so its queue and latency keep growing
+for as long as the test runs. I call a point saturated if it serves under 85% of the offered rate,
+has over 1% errors or has p95 above 120 seconds, on the majority of repeats. A slow system that is
+keeping up has high but steady latency.
+
+**3. Why did more slots not help your engine?**
+At 64 slots, nearly every pass holds a long prompt, so a pass took 216 ms against 58 ms at 16 slots.
+Four times the rows at about four times the time gives the same throughput, 238 against 234 tokens/s,
+with much worse time between tokens. Throughput only tripled when I removed the long prompts. So the
+next fix is how passes are grouped, not the slot count.

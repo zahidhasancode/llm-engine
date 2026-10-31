@@ -232,6 +232,34 @@ def test_kernel_is_private_and_on_a_t4(upload):
     assert metadata["dataset_sources"] == ["zahidhasancodeml/llm-engine-code"]
 
 
+@pytest.mark.parametrize(
+    "stage, slug",
+    [("smoke", "llm-engine-smoke"), ("benchmark", "llm-engine-serving")],
+)
+def test_serving_kernels_are_private_t4s_with_their_stage(stage, slug):
+    folder = subprocess.check_output(
+        ["bash", str(ROOT / "kaggle/push.sh"), stage],
+        env=os.environ | {"DRY_RUN": "1"},
+        text=True,
+    ).strip()
+    metadata = json.loads((Path(folder) / "kernel/kernel-metadata.json").read_text())
+    assert metadata["id"] == f"zahidhasancodeml/{slug}"
+    assert metadata["is_private"] is True
+    assert metadata["machine_shape"] == "NvidiaTeslaT4"
+    assert f'STAGE = "{stage}"' in (Path(folder) / "kernel/run.py").read_text()
+    uploaded = {str(p.relative_to(folder)) for p in Path(folder).rglob("*") if p.is_file()}
+    assert "data/code/data/prompts.jsonl" in uploaded
+    assert "data/code/scripts/loadtest.py" in uploaded
+    assert not any("output" in name for name in uploaded)
+
+
+def test_kaggle_serving_run_pins_every_library_exactly():
+    source = (ROOT / "kaggle/serving_run.py").read_text()
+    for library in ("torch", "transformers", "fastapi", "uvicorn", "httpx", "vllm"):
+        assert f'"{library}==' in source
+    assert 'os.environ["CUDA_VISIBLE_DEVICES"] = "0"' in source
+
+
 def test_kaggle_run_pins_every_library_exactly():
     source = (ROOT / "kaggle/run.py").read_text()
     for library in ("torch", "transformers", "safetensors", "pytest"):

@@ -1,0 +1,19 @@
+{
+  "engine_env": [
+    "fastapi==0.162.0",
+    "httpx==0.28.1",
+    "torch==2.15.0",
+    "transformers==5.22.1",
+    "uvicorn==0.54.0"
+  ],
+  "vllm_env": [
+    "fastapi==0.136.3",
+    "httpx==0.28.1",
+    "torch==2.13.0",
+    "transformers==5.19.0",
+    "uvicorn==0.54.0",
+    "vllm==0.32.0"
+  ],
+  "gpu": "Tesla T4, 580.178.04, 15360 MiB",
+  "cpu": "CPU(s):                                  4\nModel name:                              Intel(R) Xeon(R) CPU @ 2.00GHz\n"
+}

@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from engine.scheduler import Scheduler
-from engine.server import create_app
+from engine.server import EngineLoop, create_app
 from scripts import loadtest
 from tiny import hf_config, hf_model, my_model
 
@@ -239,6 +239,13 @@ def test_payload_has_the_settings(prompts):
     assert body["stream_options"] == {"include_usage": True}
 
 
+def test_extra_body_is_merged_into_requests(prompts):
+    fake = FakeServer(ttft=0.0, gap=0.0)
+    with Running(fake.app) as url:
+        run_tool(url, prompts, mode="closed", requests=1, extra_body='{"repetition_penalty": 1.0}')
+    assert fake.received[0]["repetition_penalty"] == 1.0
+
+
 # Errors
 
 
@@ -387,7 +394,7 @@ def test_works_against_the_real_server(prompts):
         def apply_chat_template(self, messages, **_):
             return [byte % 97 for byte in messages[0]["content"].encode()]
 
-    app = create_app(Scheduler(model, 4, 256), Tokenizer(), "tiny")
+    app = create_app(EngineLoop(Scheduler(model, 4, 256)), Tokenizer(), "tiny")
     with Running(app) as url:
         result = run_tool(
             url, prompts, "--ignore-eos", mode="poisson", rate=30, requests=30, max_tokens=8

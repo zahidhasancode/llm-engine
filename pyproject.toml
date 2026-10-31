@@ -7,7 +7,7 @@ dependencies = ["torch", "safetensors"]
 
 [project.optional-dependencies]
 # transformers is the reference the tests compare against. The engine never imports it.
-dev = ["transformers", "pytest", "kaggle", "httpx"]
+dev = ["transformers", "pytest", "kaggle", "httpx", "matplotlib"]
 server = ["fastapi", "uvicorn", "transformers"]
 
 [build-system]

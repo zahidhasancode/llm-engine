@@ -1,0 +1,102 @@
+{
+  "what": "Closed-loop throughput of my engine by slot count, on the real prompts, with users = 2 * slots",
+  "hardware": "Tesla T4, 580.178.04, 15360 MiB",
+  "cpu": "CPU(s):                                  4\nModel name:                              Intel(R) Xeon(R) CPU @ 2.00GHz\n",
+  "model": "Qwen/Qwen2.5-1.5B-Instruct, float16",
+  "settings": "greedy, ignore_eos, 64 new tokens, 6 * slots requests, one run each, prefill 256 tokens per step",
+  "results": {
+    "8": {
+      "requests": 48,
+      "succeeded": 48,
+      "errors": 0,
+      "errors_by_kind": {},
+      "wall_seconds": 20.544360572000073,
+      "total_tokens": 3072,
+      "tokens_per_second": 149.53008584685918,
+      "requests_per_second": 2.3364075913571747,
+      "ttft_ms": {
+        "p50": 3345.6145074999313,
+        "p95": 4707.9230258,
+        "p99": 4933.380299899951,
+        "mean": 3212.597368437495,
+        "count": 48
+      },
+      "inter_token_ms": {
+        "p50": 42.55935000003319,
+        "p95": 91.03021820000095,
+        "p99": 136.11651284005802,
+        "mean": 49.254256098548964,
+        "count": 2963
+      },
+      "e2e_ms": {
+        "p50": 6354.432216000021,
+        "p95": 7638.471022399972,
+        "p99": 7987.263925619992,
+        "mean": 6253.757477645831,
+        "count": 48
+      }
+    },
+    "16": {
+      "requests": 96,
+      "succeeded": 96,
+      "errors": 0,
+      "errors_by_kind": {},
+      "wall_seconds": 34.21754736499997,
+      "total_tokens": 6144,
+      "tokens_per_second": 179.5569955514842,
+      "requests_per_second": 2.8055780554919405,
+      "ttft_ms": {
+        "p50": 6099.711705500056,
+        "p95": 7077.468823999965,
+        "p99": 7298.036352450049,
+        "mean": 5505.5677699687485,
+        "count": 96
+      },
+      "inter_token_ms": {
+        "p50": 73.9643469999578,
+        "p95": 160.2459067000666,
+        "p99": 209.11576955995997,
+        "mean": 82.17195201706079,
+        "count": 5920
+      },
+      "e2e_ms": {
+        "p50": 11311.096489500016,
+        "p95": 12408.262524749973,
+        "p99": 12516.017188749998,
+        "mean": 10574.45563734375,
+        "count": 96
+      }
+    },
+    "32": {
+      "requests": 192,
+      "succeeded": 192,
+      "errors": 0,
+      "errors_by_kind": {},
+      "wall_seconds": 64.58908439100003,
+      "total_tokens": 12288,
+      "tokens_per_second": 190.2488650499005,
+      "requests_per_second": 2.9726385164046953,
+      "ttft_ms": {
+        "p50": 10261.227517500003,
+        "p95": 16158.532453900045,
+        "p99": 16984.710490449976,
+        "mean": 10387.308732546879,
+        "count": 192
+      },
+      "inter_token_ms": {
+        "p50": 132.32957549996627,
+        "p95": 275.4743631500049,
+        "p99": 338.9006394900173,
+        "mean": 154.0293887614943,
+        "count": 11832
+      },
+      "e2e_ms": {
+        "p50": 19166.803320000043,
+        "p95": 28245.230693250007,
+        "p99": 29720.273108069985,
+        "mean": 19883.42976421875,
+        "count": 192
+      }
+    }
+  }
+}

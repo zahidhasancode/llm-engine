@@ -2,22 +2,30 @@
 # Upload the code as a private Kaggle dataset, then start a private T4 GPU kernel.
 # The Kaggle CLI reads its token from ~/.kaggle/access_token. This script never touches it.
 #
-# Usage: kaggle/push.sh
+# Usage: kaggle/push.sh [step4|smoke|benchmark|gap]   (default step4)
 # DRY_RUN=1 kaggle/push.sh builds the upload folders, prints where, and uploads nothing.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 USER_NAME=zahidhasancodeml
 DATASET="$USER_NAME/llm-engine-code"
-KERNEL="$USER_NAME/llm-engine-benchmark"
+STAGE=${1:-step4}
+case "$STAGE" in
+  step4) KERNEL="$USER_NAME/llm-engine-benchmark" ;;
+  smoke) KERNEL="$USER_NAME/llm-engine-smoke" ;;
+  benchmark) KERNEL="$USER_NAME/llm-engine-serving" ;;
+  gap) KERNEL="$USER_NAME/llm-engine-gap" ;;
+  *) echo "unknown stage: $STAGE" >&2; exit 1 ;;
+esac
 K="$ROOT/.venv/bin/kaggle"
 BUILD=$(mktemp -d)
 
 # Only these paths are uploaded. Anything else in the repository stays on this machine.
-mkdir -p "$BUILD/data/code/benchmarks" "$BUILD/data/code/kaggle"
-cp -R "$ROOT/engine" "$ROOT/tests" "$ROOT/pyproject.toml" "$BUILD/data/code/"
-cp "$ROOT/benchmarks/real_model.py" "$BUILD/data/code/benchmarks/"
-cp "$ROOT/kaggle/push.sh" "$ROOT/kaggle/run.py" "$BUILD/data/code/kaggle/"
+mkdir -p "$BUILD/data/code/benchmarks" "$BUILD/data/code/kaggle" "$BUILD/data/code/data"
+cp -R "$ROOT/engine" "$ROOT/tests" "$ROOT/scripts" "$ROOT/pyproject.toml" "$BUILD/data/code/"
+cp "$ROOT"/benchmarks/*.py "$BUILD/data/code/benchmarks/"
+cp "$ROOT"/kaggle/*.sh "$ROOT"/kaggle/*.py "$BUILD/data/code/kaggle/"
+cp "$ROOT"/data/prompts.jsonl "$ROOT"/data/README.md "$BUILD/data/code/data/"
 find "$BUILD/data/code" -name __pycache__ -prune -exec rm -rf {} +
 
 cat > "$BUILD/data/dataset-metadata.json" <<EOF
@@ -25,11 +33,15 @@ cat > "$BUILD/data/dataset-metadata.json" <<EOF
 EOF
 
 mkdir -p "$BUILD/kernel"
-cp "$ROOT/kaggle/run.py" "$BUILD/kernel/run.py"
+if [ "$STAGE" = "step4" ]; then
+  cp "$ROOT/kaggle/run.py" "$BUILD/kernel/run.py"
+else
+  sed "s/^STAGE = .*/STAGE = \"$STAGE\"/" "$ROOT/kaggle/serving_run.py" > "$BUILD/kernel/run.py"
+fi
 cat > "$BUILD/kernel/kernel-metadata.json" <<EOF
 {
   "id": "$KERNEL",
-  "title": "llm-engine-benchmark",
+  "title": "$(basename "$KERNEL")",
   "code_file": "run.py",
   "language": "python",
   "kernel_type": "script",

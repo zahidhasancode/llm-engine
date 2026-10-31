@@ -159,7 +159,7 @@ def build_payload(prompt: str, args: argparse.Namespace) -> dict:
     }
     if args.ignore_eos:
         payload["ignore_eos"] = True
-    return payload
+    return payload | json.loads(args.extra_body)
 
 
 async def run_poisson(client, url, prompts, args) -> list[Record]:
@@ -265,6 +265,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--ignore-eos", action="store_true", help="always run to max tokens")
+    parser.add_argument("--extra-body", default="{}", help="JSON merged into every request")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--output", default=None, help="file for the raw per-request JSON")

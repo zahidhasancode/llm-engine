@@ -115,6 +115,18 @@ class EngineLoop:
                 if event.finish_reason is not None:
                     del self.sinks[event.request_id]
 
+    def status(self) -> dict:
+        scheduler = self.scheduler
+        return {
+            "active": len(scheduler.requests) - len(scheduler.waiting),
+            "waiting": len(scheduler.waiting),
+            "free_slots": len(scheduler.free_slots),
+            "total_slots": scheduler.cache.num_slots,
+        }
+
+    def metrics(self) -> str:
+        return render_metrics(self)
+
     def _abandon_everything(self, error: Exception) -> list[Event]:
         message = f"{type(error).__name__}: {error}"
         events = []
@@ -169,13 +181,17 @@ def error_response(status: int, message: str, kind: str, code: str | None = None
 
 
 def create_app(
-    scheduler: Scheduler,
+    engine: "EngineLoop",
     tokenizer,
     model_name: str,
     stop_tokens: tuple[int, ...] = (),
     default_max_tokens: int = 256,
 ) -> FastAPI:
-    engine = EngineLoop(scheduler)
+    """Build the web app around an engine.
+
+    The engine needs start, stop, alive, submit, cancel, status and metrics, so another
+    backend can sit behind the same API.
+    """
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -256,18 +272,12 @@ def create_app(
         ok = engine.alive
         return JSONResponse(
             status_code=200 if ok else 503,
-            content={
-                "status": "ok" if ok else "engine loop stopped",
-                "active": len(scheduler.requests) - len(scheduler.waiting),
-                "waiting": len(scheduler.waiting),
-                "free_slots": len(scheduler.free_slots),
-                "total_slots": scheduler.cache.num_slots,
-            },
+            content={"status": "ok" if ok else "engine loop stopped"} | engine.status(),
         )
 
     @app.get("/metrics")
     async def metrics() -> PlainTextResponse:
-        return PlainTextResponse(render_metrics(engine), media_type="text/plain; version=0.0.4")
+        return PlainTextResponse(engine.metrics(), media_type="text/plain; version=0.0.4")
 
     return app
 
@@ -476,7 +486,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     eos = GenerationConfig.from_pretrained(args.model_path).eos_token_id
     stop_tokens = tuple(eos) if isinstance(eos, list) else (eos,)
-    app = create_app(scheduler, tokenizer, args.model_name, stop_tokens)
+    app = create_app(EngineLoop(scheduler), tokenizer, args.model_name, stop_tokens)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

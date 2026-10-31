@@ -1,0 +1,109 @@
+{
+  "run": {
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "model_revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+    "dtype": "float16",
+    "kernel": "llm-engine-gap v1",
+    "gpu": "Tesla T4, 580.178.04, 15360 MiB",
+    "cpu": "4 vCPU Intel Xeon 2.00GHz",
+    "engine_env": [
+      "fastapi==0.162.0",
+      "httpx==0.28.1",
+      "torch==2.15.0",
+      "transformers==5.22.1",
+      "uvicorn==0.54.0"
+    ],
+    "vllm_env": [
+      "fastapi==0.136.3",
+      "httpx==0.28.1",
+      "torch==2.13.0",
+      "transformers==5.19.0",
+      "uvicorn==0.54.0",
+      "vllm==0.32.0"
+    ]
+  },
+  "what": "vLLM decode step time, by the same difference as step_time.py",
+  "dtype": "float16",
+  "prompt_length": 256,
+  "steps": 64,
+  "repeats": 3,
+  "enforce_eager": true,
+  "attention_backend": "FLEX_ATTENTION",
+  "rows": [
+    {
+      "batch": 1,
+      "ms_per_step": 34.090438499987386,
+      "tokens_per_second": 29.333738256267075,
+      "short_runs_s": [
+        0.044570500000190805,
+        0.05274016100065637,
+        0.052613065000514325
+      ],
+      "long_runs_s": [
+        2.3090475179997156,
+        2.1929713660001653,
+        2.234401128999707
+      ]
+    },
+    {
+      "batch": 16,
+      "ms_per_step": 53.588047250002546,
+      "tokens_per_second": 298.57404441993805,
+      "short_runs_s": [
+        0.6146875019994695,
+        0.6260976949997712,
+        0.6269328870002937
+      ],
+      "long_runs_s": [
+        4.04569811500005,
+        4.055732718999934,
+        4.066314493000391
+      ]
+    },
+    {
+      "batch": 32,
+      "ms_per_step": 78.72877698436298,
+      "tokens_per_second": 406.4587464169017,
+      "short_runs_s": [
+        1.469588188000671,
+        1.4747592390003774,
+        1.4587659859998894
+      ],
+      "long_runs_s": [
+        6.640251804999934,
+        6.508229914999902,
+        6.472008110999923
+      ]
+    },
+    {
+      "batch": 64,
+      "ms_per_step": 115.0117109687443,
+      "tokens_per_second": 556.4650717820615,
+      "short_runs_s": [
+        2.6552868339995257,
+        2.6393343420004385,
+        2.623133498000243
+      ],
+      "long_runs_s": [
+        9.969597459000397,
+        10.000083844000073,
+        10.102149668000493
+      ]
+    },
+    {
+      "batch": 128,
+      "ms_per_step": 186.4847994375083,
+      "tokens_per_second": 686.3830209544411,
+      "short_runs_s": [
+        5.333845545999793,
+        5.30333654199967,
+        5.267214612999851
+      ],
+      "long_runs_s": [
+        17.190844028000356,
+        17.2383637060002,
+        17.270700606999526
+      ]
+    }
+  ]
+}
