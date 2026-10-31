@@ -206,7 +206,10 @@ def test_upload_is_only_code(upload):
     assert "data/code/engine/model.py" in files
     assert "data/code/benchmarks/real_model.py" in files
     assert "kernel/run.py" in files
-    assert not any(".venv" in f or ".git" in f or "CLAUDE" in f for f in files)
+    uploaded = {f.split("/")[2] for f in files if f.startswith("data/code/")}
+    assert uploaded == {
+        "benchmarks", "data", "engine", "kaggle", "pyproject.toml", "scripts", "tests",
+    }
     assert not any(f.endswith((".json", ".safetensors")) for f in files if "/code/" in f)
 
 

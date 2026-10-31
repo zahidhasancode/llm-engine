@@ -343,3 +343,8 @@ Stage 1, the serving engine, is finished. These stages are planned and **not bui
 - **Speculative decoding:** a smaller Qwen2 model drafts tokens and the large model checks them.
 - **Agent speculation:** running safe, reversible tool calls early. The planned reference is
   "Speculative Actions" (Columbia, arXiv 2510.04371).
+
+## Licence
+
+The code is under the [MIT licence](LICENSE). The prompts in `data/prompts.jsonl` stay under
+CC BY-SA 3.0.
