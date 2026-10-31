@@ -1,12 +1,44 @@
 # llm-engine
 
-An LLM serving engine written from scratch in Python and PyTorch. It runs Qwen2 models and serves
-them through an OpenAI-compatible API, with continuous batching and token streaming.
+**An LLM serving engine built from scratch in Python and PyTorch, measured against vLLM on a real
+GPU.** It has its own Qwen2 model, key/value cache, continuous batching scheduler and
+OpenAI-compatible streaming API.
 
-I built it to understand how serving works, not to replace anything. On a Tesla T4 it serves
-**7 times the tokens per second of Hugging Face `generate` run one request at a time, and vLLM
-serves 7 times more than it does.** This README gives the measurements and shows where that gap
-comes from.
+Built by [MD Zahid Hasan](https://zahid-profile.vercel.app) to learn how LLM serving works from the
+inside. It is a learning project, not a replacement for vLLM.
+
+| | |
+|---|---|
+| **Result** | 229 tokens/s on one Tesla T4: 7 times Hugging Face `generate` run one request at a time (32), and 7 times below vLLM (1,680) |
+| **Main finding** | The cost is not HTTP (3–5%). One long prompt sets the attention cost for every request in a pass, and vLLM's attention kernel keeps large batches cheap |
+| **Evidence** | 3 repeats per point, raw per-request data saved for every run, 458 tests |
+
+![Maximum throughput](benchmarks/charts/max_throughput.png)
+
+## What this project shows
+
+| Skill | Where to see it |
+|---|---|
+| Transformer internals: rotary embeddings, grouped-query attention, KV cache | [engine/model.py](engine/model.py), [engine/cache.py](engine/cache.py) |
+| Serving design: continuous batching, chunked prefill, admission control, cancellation | [engine/scheduler.py](engine/scheduler.py) |
+| Concurrency: async API with one engine thread, streaming, disconnect handling | [engine/server.py](engine/server.py) |
+| Benchmarking: open and closed loops, coordinated omission, saturation | [scripts/loadtest.py](scripts/loadtest.py), [benchmarks/](benchmarks/) |
+| Performance analysis: finding a cause by removing one thing at a time | [Why it is slower than vLLM](#why-it-is-slower-than-vllm) |
+| Honest reporting: what failed, what is limited, what is not proven | [Honest limits](#honest-limits) |
+
+Three problems I found and fixed along the way:
+
+- **NaN in float16.** Attention scores overflowed in half precision, so they are now computed in
+  float32. A related trap: `0 * NaN` is still NaN, so the cache starts zeroed and is cleared on release.
+- **A disconnect that nobody noticed.** Under a steady flow of events, a non-streaming client's
+  disconnect was never checked. The check now runs on a timer.
+- **Tests too weak to catch bugs.** I planted bugs on purpose to check the tests. Some survived, so
+  I added exact tests on hand-made records.
+
+**Contents:** [What it does](#what-it-does) · [Architecture](#architecture) ·
+[Quick start](#quick-start) · [Results](#results) ·
+[Why it is slower than vLLM](#why-it-is-slower-than-vllm) · [Honest limits](#honest-limits) ·
+[Repository layout](#repository-layout) · [What comes next](#what-comes-next)
 
 ## What it does
 
@@ -52,6 +84,75 @@ decides the number of slots, and "budget full" simply means every slot is busy.
 Build notes for each step, with interview questions, are in
 [docs/build-notes.md](docs/build-notes.md).
 
+## Quick start
+
+You need Python 3.11 or later. The tests need no GPU and download no model: they use a tiny random
+model and take about a minute.
+
+```bash
+python -m venv .venv
+```
+
+```bash
+.venv/bin/pip install -e ".[dev,server]"
+```
+
+```bash
+.venv/bin/python -m pytest
+```
+
+The real model needs a CUDA GPU. Everything here was measured on a T4 with 15 GB of memory. Download
+the model and start the server, using the folder the first command prints:
+
+```bash
+.venv/bin/python -c "from huggingface_hub import snapshot_download as d; print(d('Qwen/Qwen2.5-1.5B-Instruct'))"
+```
+
+```bash
+.venv/bin/python -m engine.server --model-path <model folder> --model-name qwen --slots 16 --max-length 2048
+```
+
+Then send it a streaming request:
+
+```bash
+curl -N http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model": "qwen", "messages": [{"role": "user", "content": "Why is the sky blue?"}], "max_tokens": 40, "stream": true}'
+```
+
+Load test this server, or any other OpenAI-compatible one:
+
+```bash
+.venv/bin/python scripts/loadtest.py --base-url http://127.0.0.1:8000 --model qwen --prompts data/prompts.jsonl --mode poisson --rate 1 --duration 60 --output out.json
+```
+
+Repeat the benchmarks on a private Kaggle T4, which needs your own Kaggle token:
+
+```bash
+kaggle/push.sh benchmark
+```
+
+```bash
+kaggle/push.sh gap
+```
+
+### Server options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--model-path` | required | Folder with the checkpoint |
+| `--model-name` | `local` | Name reported in responses |
+| `--device` | `cuda` | Where the model runs |
+| `--dtype` | `float16` | `float16`, `bfloat16` or `float32` |
+| `--slots` | 8 | Requests that can run at once |
+| `--max-length` | 4096 | Most tokens in one request, prompt included |
+| `--prefill-tokens-per-step` | 256 | Prompt tokens processed between decode passes |
+| `--max-waiting` | 1024 | Queue length before new requests are refused |
+| `--cache-budget-mb` | none | Memory limit for the cache |
+| `--host`, `--port` | `127.0.0.1`, 8000 | Where to listen |
+
+`POST /v1/chat/completions` accepts `messages`, `max_tokens`, `temperature`, `top_p`, `top_k`,
+`repetition_penalty`, `seed`, `stream`, `stream_options` and `ignore_eos`. It refuses `n` above 1,
+`stop` strings, and presence or frequency penalties, rather than ignoring them.
+
 ## Results
 
 **Hardware:** one Tesla T4 (15,360 MiB, driver 580.178.04) with 4 vCPUs (Intel Xeon 2.00 GHz) on a
@@ -85,8 +186,6 @@ point.
 
 "Kept up with" means the system served at least 85% of the offered rate, with under 1% errors and
 p95 under 120 seconds, on the majority of repeats.
-
-![Maximum throughput](benchmarks/charts/max_throughput.png)
 
 ### Latency against load
 
@@ -206,39 +305,17 @@ own pass, use PyTorch's attention function, and compile the decode step.
   measured separately.
 - Short-prompt runs show what long prompts cost. They are not a result for real traffic.
 
-## Running it
+## Repository layout
 
-The Mac this was built on has 8 GB of memory, so tests use a tiny random model and real runs happen
-on Kaggle.
-
-```bash
-python -m venv .venv
-.venv/bin/pip install -e ".[dev,server]"
-.venv/bin/python -m pytest
-```
-
-Start the server on a machine with a GPU:
-
-```bash
-python -m engine.server --model-path <model folder> --model-name qwen --dtype float16 --slots 16
-```
-
-Load test any OpenAI-compatible server:
-
-```bash
-python scripts/loadtest.py --base-url http://127.0.0.1:8000 --model qwen \
-    --prompts data/prompts.jsonl --mode poisson --rate 1 --duration 60 --output out.json
-```
-
-Repeat the benchmark on a private Kaggle T4, which needs your own Kaggle token:
-
-```bash
-kaggle/push.sh benchmark
-```
-
-```bash
-kaggle/push.sh gap
-```
+| Path | What is there |
+|---|---|
+| `engine/` | The model, weight loader, cache, sampling, scheduler and server |
+| `scripts/` | Load test, the Hugging Face comparison server and the charts |
+| `benchmarks/` | Benchmark code, saved results, raw data and charts |
+| `kaggle/` | Runs tests and benchmarks on a private Kaggle GPU |
+| `tests/` | 458 tests on tiny random models |
+| `data/` | The 200 benchmark prompts |
+| `docs/build-notes.md` | What each step built and why, with interview questions |
 
 ## Result files
 
@@ -258,3 +335,11 @@ model and settings.
 | `charts/` | The charts above, drawn by `scripts/make_charts.py` |
 
 Prompts come from Dolly 15k (CC BY-SA 3.0). See [data/README.md](data/README.md).
+
+## What comes next
+
+Stage 1, the serving engine, is finished. These stages are planned and **not built yet**:
+
+- **Speculative decoding:** a smaller Qwen2 model drafts tokens and the large model checks them.
+- **Agent speculation:** running safe, reversible tool calls early. The planned reference is
+  "Speculative Actions" (Columbia, arXiv 2510.04371).
